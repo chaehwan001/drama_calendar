@@ -1,5 +1,0 @@
-title   genre_name channel_name  first_air_date  end_air_date  status   directir   writer   avg_rating
-
-title genre_name channel_name
-
-title person_name
