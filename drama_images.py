@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Namuwiki drama image fetcher (requests-only, user-selectors + fallback)
+Namuwiki drama image fetcher (심플 플로우 버전)
 
-규칙:
-  1) /w/{제목} 기본 페이지 열기
-     - cue 탐지(방송시간/방송기간/제작사)가 성공하면 저장
-     - cue 실패 → (드라마) 변형 시도
-  2) (드라마) 변형 시도 (공백 포함/미포함)
-     - 문서 있으면 저장
-  3) (드라마) 변형도 실패하면 검색(/Search?q=...) 시도
-  4) 모든 게 실패하면 → 마지막으로 기본 페이지에서 og:image만 시도
+요구사항대로 단순화:
+  1) /w/{제목} 기본 페이지 열어 html0, href0 확보
+  2) (드라마) 변형 2종(공백/무공백) 중 '존재하면' 그 문서의 og:image 저장 → 끝
+     - (드라마) 문서가 있지만 이미지가 없거나 다운로드 실패면 기본으로 폴백
+  3) (드라마) 문서가 없으면 기본 페이지의 og:image 저장
+  4) 위가 모두 실패면 FAIL
+
+검색, cue 탐지 전부 제거함.
 """
 
 import os
@@ -22,7 +22,7 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
-# ===== 고정 경로 =====
+# ===== 고정 경로 (네가 준 경로 그대로) =====
 CSV_PATH = Path(r"C:\Users\PC\Desktop\workspace\kdrama_2025.csv")
 OUT_DIR  = Path(r"C:\Users\PC\Desktop\workspace\namu_images")
 LOG_PATH = Path(r"C:\Users\PC\Desktop\workspace\namu_image_results.csv")
@@ -36,10 +36,7 @@ HEADERS = {
     "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
 }
 TIMEOUT = 4
-ALLOWED_PREFIXES = ("/", "/w/", "/Search", "/img/", "/i/", "/js/", "/css/", "/_nuxt/")
-SEARCH_CAND_LIMIT = 12
-PRIMARY_FIRST_CELL = "article table tbody tr:nth-of-type(1) td strong a:nth-of-type(2)"
-NS_BLOCK = {"틀:", "분류:", "파일:", "나무뉴스:", "포털:", "나무위키:"}
+ALLOWED_PREFIXES = ("/", "/w/", "/img/", "/i/", "/js/", "/css/", "/_nuxt/")
 
 # ===== 유틸 =====
 def allowed(url: str) -> bool:
@@ -47,18 +44,23 @@ def allowed(url: str) -> bool:
     return any(p.path.startswith(pref) for pref in ALLOWED_PREFIXES)
 
 def nurl(src: str, base: str = BASE) -> str:
-    if not src: return src
+    if not src:
+        return src
     s = src.strip()
-    if s.startswith("//"): return "https:" + s
-    if s.startswith("/"):  return urljoin(base, s)
-    if s.lower().startswith(("http://", "https://")): return s
+    if s.startswith("//"):
+        return "https:" + s
+    if s.startswith("/"):
+        return urljoin(base, s)
+    if s.lower().startswith(("http://", "https://")):
+        return s
     return urljoin(base, s)
 
 def sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", str(name)).strip() or "untitled"
 
 def norm_title(s: str) -> str:
-    if not s: return ""
+    if not s:
+        return ""
     t = str(s).strip()
     t = re.sub(r"\s*\(드라마\)\s*$", "", t)   # 입력에 (드라마) 붙어있으면 제거
     t = re.sub(r"[《》〈〉“”‘’\"'`]+", "", t)
@@ -66,10 +68,12 @@ def norm_title(s: str) -> str:
     return t
 
 def get(url: str):
-    if not allowed(url): return None, "disallowed_path"
+    if not allowed(url):
+        return None, "disallowed_path"
     try:
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        if r.status_code != 200: return None, f"http_{r.status_code}"
+        if r.status_code != 200:
+            return None, f"http_{r.status_code}"
         return r.text, ""
     except requests.RequestException as e:
         return None, type(e).__name__
@@ -77,124 +81,41 @@ def get(url: str):
 def extract_og_image(html: str) -> str | None:
     soup = BeautifulSoup(html, "html.parser")
     tag = soup.find("meta", attrs={"property": "og:image"})
-    if not tag: return None
+    if not tag:
+        return None
     val = (tag.get("content") or "").strip()
-    if not val: return None
-    if val.startswith("data:"): return None
-    if re.search(r"\.(svg|ico)(?:$|\?)", val, re.I): return None
-    if re.search(r"(logo|favicon|sprite|icon)", val, re.I): return None
+    if not val:
+        return None
+    if val.startswith("data:"):
+        return None
+    if re.search(r"\.(svg|ico)(?:$|\?)", val, re.I):
+        return None
+    if re.search(r"(logo|favicon|sprite|icon)", val, re.I):
+        return None
     return nurl(val)
 
-def page_title_from_href(href: str) -> str:
-    try:
-        path = urlparse(href).path
-        seg = path.split("/w/", 1)[1]
-        return unquote(seg)
-    except Exception:
-        return ""
-
-# ===== cue 탐지 =====
-USER_CUE_SELECTORS = [
-    "#app > div._33tYGuFD.j70YQcVX > div._2YoJ2ekz.gjUlfO4c.nJWG3DK4 > div > "
-    "div._2TXHt7\\+b > div.JQ25nrVt.xziyWtO1 > div.XnsdLk84.V1CsAF42 > "
-    "div.a2-QXwj\\+.uAm4KzJH > div.LNdKUH95.mwhzH2ge > table > tbody > "
-    "tr:nth-child(5) > td._59c09bccb6640fbd0e897b67a6e26041 > div > strong",
-
-    "#app > div._33tYGuFD.j70YQcVX > div._2YoJ2ekz.gjUlfO4c.nJWG3DK4 > div > "
-    "div._2TXHt7\\+b > div.JQ25nrVt.xziyWtO1 > div.XnsdLk84.V1CsAF42 > "
-    "div.a2-QXwj\\+.uAm4KzJH > div.LNdKUH95.mwhzH2ge > table > tbody > "
-    "tr:nth-child(6) > td._59c09bccb6640fbd0e897b67a6e26041 > div > strong",
-
-    "#app > div._33tYGuFD.j70YQcVX > div._2YoJ2ekz.gjUlfO4c.nJWG3DK4 > div > "
-    "div._2TXHt7\\+b > article > div.XnsdLk84.V1CsAF42 > "
-    "div.a2-QXwj\\+.uAm4KzJH > div.LNdKUH95.mwhzH2ge > table > tbody > "
-    "tr:nth-child(6) > td._60767ea1adaefa1c429fee5d0f53cfcf > div > strong",
-]
-CUE_KEYWORDS = {"방송시간", "방송 시간", "방송기간", "방송 기간", "제작사"}
-
-def has_user_cue_or_fallback(html: str) -> tuple[bool, str]:
-    soup = BeautifulSoup(html, "html.parser")
-
-    for sel in USER_CUE_SELECTORS:
-        el = soup.select_one(sel)
-        if not el: continue
-        txt = (el.get_text() or "").strip()
-        if txt in ("방송시간", "방송기간"):
-            return True, "user_sel"
-
-    article = soup.select_one("article")
-    if not article:
-        return False, "none"
-
-    tables = article.select("table")[:6] or []
-    for tbl in tables:
-        for el in tbl.select("strong, th, td, b, span"):
-            raw = (el.get_text() or "").strip()
-            if not raw: continue
-            norm = re.sub(r"\s+", " ", raw).strip(" :\t\r\n")
-            if norm in CUE_KEYWORDS:
-                return True, "fallback"
-    return False, "none"
-
-# ===== 검색 후보 고르기 =====
-def pick_first_result_href_from_search(html: str, prefer_exact: str | None = None) -> str | None:
-    soup = BeautifulSoup(html, "html.parser")
-    a = soup.select_one(PRIMARY_FIRST_CELL)
-    if a and a.get("href"):
-        href = nurl(a.get("href"))
-        if allowed(href):
-            if not prefer_exact or page_title_from_href(href) == prefer_exact:
-                return href
-    cands = []
-    for a in soup.select("article a[href^='/w/']"):
-        href = a.get("href") or ""
-        full = nurl(href)
-        if not allowed(full): continue
-        title_text = page_title_from_href(href)
-        if any(title_text.startswith(ns) for ns in NS_BLOCK):
-            continue
-        cands.append((full, title_text))
-        if len(cands) >= SEARCH_CAND_LIMIT * 3:
-            break
-    if not cands:
-        return None
-    if prefer_exact:
-        for full, title_text in cands:
-            if title_text == prefer_exact:
-                return full
-    return cands[0][0]
-
-# ===== 열기 보조 =====
 def open_w_exact(title_text: str):
+    """정확히 /w/{title} 문서를 연다."""
     url = f"{BASE}/w/{quote(title_text, safe='')}"
     html, err = get(url)
     if html is None:
         return None, url, f"open_detail_failed:{err}"
     return html, url, "OK"
 
-def search_and_open_first(query: str, prefer_exact: str | None = None):
-    url = f"{BASE}/Search?q={quote(query)}"
-    html, err = get(url)
-    if html is None:
-        return None, "", f"open_search_failed:{err}"
-    href = pick_first_result_href_from_search(html, prefer_exact=prefer_exact)
-    if not href:
-        return None, "", "no_first_result"
-    doc, err2 = get(href)
-    if doc is None:
-        return None, href, f"open_detail_failed:{err2}"
-    return doc, href, "OK"
-
 def download_image(url: str, out_path: Path, referer: str) -> bool:
-    if not allowed(url): return False
-    headers = dict(HEADERS); headers["Referer"] = referer
+    if not allowed(url):
+        return False
+    headers = dict(HEADERS)
+    headers["Referer"] = referer
     try:
         with requests.get(url, headers=headers, stream=True, timeout=TIMEOUT) as r:
-            if r.status_code != 200: return False
+            if r.status_code != 200:
+                return False
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with open(out_path, "wb") as f:
                 for chunk in r.iter_content(16384):
-                    if chunk: f.write(chunk)
+                    if chunk:
+                        f.write(chunk)
         return True
     except requests.RequestException:
         return False
@@ -213,46 +134,40 @@ def save_og_as(title_disp: str, page_url: str, html: str, note_tag: str):
     return {"title": title_disp, "status": "OK", "note": note_tag,
             "page_url": page_url, "image_url": img, "saved_path": str(outp)}
 
-# ===== 메인 플로우 =====
+# ===== 메인 플로우 (단순화) =====
 def process_title(title: str):
+    """
+    0) 기본 /w/{제목} 열기 (html0, href0)
+    1) (드라마) 변형 2종 중 하나라도 '문서가 있으면' 그 문서 이미지 저장
+       - 이미지가 없거나 다운로드 실패면 기본으로 폴백
+    2) (드라마) 문서가 없으면 기본 페이지 이미지 저장
+    """
     base = norm_title(title)
 
     # 0) 기본 문서
     html0, href0, note0 = open_w_exact(base)
-    if html0 is not None:
-        ok, how = has_user_cue_or_fallback(html0)
-        if ok:
-            return save_og_as(title, href0, html0, f"exact_base:{how}")
 
-    # 1) (드라마) 변형
-    drama_variants = [f"{base} (드라마)", f"{base}(드라마)"]
-    for dv in drama_variants:
+    # 1) (드라마) 변형 (공백/무공백)
+    for dv in (f"{base} (드라마)", f"{base}(드라마)"):
         html1, href1, note1 = open_w_exact(dv)
         if html1 is not None:
-            return save_og_as(title, href1, html1, "drama:exact")
+            res = save_og_as(title, href1, html1, "drama:exact")
+            if res["status"] == "OK":
+                return res
+            # (드라마) 문서는 있으나 이미지 문제 → 기본으로 폴백 시도 (루프 탈출)
+            break
 
-    # 2) 검색 보조
-    html2, href2, note2 = search_and_open_first(f"{base} 드라마", prefer_exact=drama_variants[0])
-    if html2 is not None:
-        return save_og_as(title, href2, html2, "drama:search_exact")
-
-    # 3) '(드라마)' 자체 검색
-    for dv in drama_variants:
-        html3, href3, note3 = search_and_open_first(dv, prefer_exact=dv)
-        if html3 is not None:
-            return save_og_as(title, href3, html3, "drama:search_exact2")
-
-    # 4) 모든 게 실패 → 기본 문서 og:image만 시도
+    # 2) 기본 문서로 폴백
     if html0 is not None:
-        res_try = save_og_as(title, href0, html0, "fallback:og_only")
-        if res_try["status"] == "OK":
-            return res_try
+        res0 = save_og_as(title, href0, html0, "base_page")
+        if res0["status"] == "OK":
+            return res0
+        return {"title": title, "status": "FAIL", "note": "no_image_on_base",
+                "page_url": href0, "image_url": "", "saved_path": ""}
 
-    return {
-        "title": title, "status": "FAIL",
-        "note": f"no_match:{note0}",
-        "page_url": href0, "image_url": "", "saved_path": ""
-    }
+    # 기본 문서 자체가 열리지 않은 경우
+    return {"title": title, "status": "FAIL", "note": f"open_base_failed:{note0}",
+            "page_url": href0, "image_url": "", "saved_path": ""}
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
