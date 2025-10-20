@@ -2,8 +2,11 @@
 """
 카테고리 '대한민국의 코미디 드라마'에서 모든 컬럼(ㄱ/ㄴ/ㄷ …) + 페이지네이션까지 훑어서
 각 항목 상세 페이지의 '제목 / 장르 / 방송사'만 추출하여 CSV 저장.
+저장 전에 genre_name을 자동 보정:
+  1) 비었거나 결측 → "코미디"
+  2) "코미디" 미포함 → "코미디, {기존장르}"
 
-출력: comedy_dramas_all.csv (UTF-8 with BOM), 컬럼: title, genre, broadcaster
+출력: comedy_dramas_all.csv (UTF-8 with BOM), 컬럼: title, genre_name, channel_name
 """
 
 import re
@@ -27,6 +30,7 @@ HEADERS = {
 
 SLEEP = 0.7  # 요청 간 매너 타임(초)
 NEXT_SELECTOR = "#mw-pages > a:nth-child(3)"  # 우선 사용될 '다음 페이지' CSS 선택자
+GENRE_KEYWORD = "코미디"  # 이 스크립트의 장르 키워드
 
 def clean_text(s: str) -> str:
     if not s:
@@ -128,10 +132,33 @@ def scrape_detail(detail_url: str) -> dict:
                 broadcaster = "; ".join(links) if links else value_text
 
     return {
-    "title": title,
-    "genre_name": genre,
-    "channel_name": broadcaster.replace(";", ", ").strip(", ").strip()
-}
+        "title": title,
+        "genre_name": genre,
+        "channel_name": broadcaster.replace(";", ", ").strip(", ").strip()
+    }
+
+def fix_genre_value(s: object, keyword: str = GENRE_KEYWORD) -> str:
+    """
+    장르 자동 보정 규칙:
+      1) 결측/빈문자열/공백/문자열 'nan'/'none' → '{keyword}'
+      2) '{keyword}' 미포함 → '{keyword}, {기존장르}'
+      3) 불필요한 중복 구두점/공백 정리
+    """
+    if pd.isna(s):
+        return keyword
+
+    s = str(s).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return keyword
+
+    s = s.strip(",; ")
+    if keyword in s:
+        return s
+
+    fixed = f"{keyword}, {s}"
+    fixed = re.sub(r"[;,]\s*[;,]+", ", ", fixed)
+    fixed = re.sub(r"\s*,\s*", ", ", fixed)
+    return fixed.strip(",; ").strip() or keyword
 
 def main():
     print("[*] 크롤링 시작:", CATEGORY_URL)
@@ -163,9 +190,12 @@ def main():
     # 제목 기준 중복 제거
     df = df.drop_duplicates(subset=["title"])
 
+    # 🔹 장르 자동 보정 (빈값 → "코미디", 미포함 시 맨 앞에 "코미디, " 추가)
+    df["genre_name"] = df["genre_name"].apply(fix_genre_value)
+
     out = "comedy_dramas_all.csv"
     df.to_csv(out, index=False, encoding="utf-8-sig")
-    print(f"[✓] 저장 완료: {out} (행 수: {len(df)})")
+    print(f"[✓] 장르 보정 포함 저장 완료: {out} (행 수: {len(df)})")
 
 if __name__ == "__main__":
     main()

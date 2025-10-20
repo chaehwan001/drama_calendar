@@ -2,8 +2,11 @@
 """
 카테고리 '대한민국의 법률 드라마'에서 모든 컬럼(ㄱ/ㄴ/ㄷ …) + 페이지네이션까지 훑어서
 각 항목 상세 페이지의 '제목 / 장르 / 방송사'만 추출하여 CSV 저장.
+저장 전에 genre_name 자동 보정:
+  1) 비었거나 결측 → "법률"
+  2) "법률" 미포함 → "법률, {기존장르}"
 
-출력: law_dramas_all.csv (UTF-8 with BOM), 컬럼: title, genre, broadcaster
+출력: law_dramas_all.csv (UTF-8 with BOM), 컬럼: title, genre_name, channel_name
 """
 
 import re
@@ -25,13 +28,14 @@ HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.5",
 }
 
-SLEEP = 0.7  # 요청 간 매너 타임(초)
-NEXT_SELECTOR = "#mw-pages > a:nth-child(3)"  # 우선 사용될 '다음 페이지' CSS 선택자
+SLEEP = 0.7
+NEXT_SELECTOR = "#mw-pages > a:nth-child(3)"
+GENRE_KEYWORD = "법률"
 
 def clean_text(s: str) -> str:
     if not s:
         return ""
-    s = re.sub(r"\[[^\]]*\]", "", s)  # [주 1], [1] 등 제거
+    s = re.sub(r"\[[^\]]*\]", "", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
@@ -41,26 +45,15 @@ def get_soup(url: str) -> BeautifulSoup:
     return BeautifulSoup(r.text, "lxml")
 
 def find_next_link(soup: BeautifulSoup) -> Optional[str]:
-    """지정 셀렉터 우선, 실패 시 '다음 페이지' 텍스트 폴백."""
-    # 1) 지정 셀렉터 시도
     el = soup.select_one(NEXT_SELECTOR)
     if el and el.get("href"):
         return urljoin(BASE, el.get("href"))
-
-    # 2) 폴백: 텍스트가 '다음 페이지'인 링크
     for a in soup.select("#mw-pages a"):
         if clean_text(a.get_text()) == "다음 페이지" and a.get("href"):
             return urljoin(BASE, a.get("href"))
-
     return None
 
 def iter_all_category_links(first_url: str):
-    """
-    카테고리 페이지에서:
-      - 컬럼 인덱스 1부터 증가시키며 존재할 때까지(없으면 종료)
-      - 각 컬럼의 모든 <li><a>를 수집
-      - '다음 페이지'가 있으면 지정 셀렉터/폴백으로 따라가며 반복
-    """
     url = first_url
     seen_urls = set()
 
@@ -88,23 +81,14 @@ def iter_all_category_links(first_url: str):
         if not found_any:
             break
 
-        # '다음 페이지' (셀렉터 우선 + 폴백)
         url = find_next_link(soup)
         time.sleep(SLEEP)
 
 def scrape_detail(detail_url: str) -> dict:
-    """
-    상세 페이지에서 '제목 / 장르 / 방송사' 추출.
-    - 제목: h1#firstHeading
-    - 장르/방송사: infobox의 th 라벨 확인
-    """
     soup = get_soup(detail_url)
-
-    # 제목
     title_el = soup.select_one("#firstHeading")
     title = clean_text(title_el.get_text()) if title_el else ""
 
-    # infobox
     infobox = soup.select_one("#mw-content-text table.infobox")
     genre = ""
     broadcaster = ""
@@ -118,20 +102,33 @@ def scrape_detail(detail_url: str) -> dict:
             label = clean_text(th.get_text()) if th else ""
             value_text = clean_text(td.get_text())
 
-            # 장르
             if label and ("장르" in label) and not genre:
                 genre = value_text
 
-            # 방송사/채널/방송국
             if label and re.search(r"(방송\s*사|방송\s*채널|채널|방송국)", label) and not broadcaster:
                 links = [clean_text(a.get_text()) for a in td.select("a") if clean_text(a.get_text())]
                 broadcaster = "; ".join(links) if links else value_text
 
     return {
-    "title": title,
-    "genre_name": genre,
-    "channel_name": broadcaster.replace(";", ", ").strip(", ").strip()
-}
+        "title": title,
+        "genre_name": genre,
+        "channel_name": broadcaster.replace(";", ", ").strip(", ").strip()
+    }
+
+def fix_genre_value(s: object, keyword: str = GENRE_KEYWORD) -> str:
+    """장르 자동 보정 규칙."""
+    if pd.isna(s):
+        return keyword
+    s = str(s).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return keyword
+    s = s.strip(",; ")
+    if keyword in s:
+        return s
+    fixed = f"{keyword}, {s}"
+    fixed = re.sub(r"[;,]\s*[;,]+", ", ", fixed)
+    fixed = re.sub(r"\s*,\s*", ", ", fixed)
+    return fixed.strip(",; ").strip() or keyword
 
 def main():
     print("[*] 크롤링 시작:", CATEGORY_URL)
@@ -155,17 +152,16 @@ def main():
         print("[-] 결과가 없습니다.")
         return
 
-    # DataFrame 구성 및 정리
     df = pd.DataFrame(rows, columns=["title", "genre_name", "channel_name"])
     for c in ["title", "genre_name", "channel_name"]:
         df[c] = df[c].astype(str).map(clean_text)
 
-    # 제목 기준 중복 제거
     df = df.drop_duplicates(subset=["title"])
+    df["genre_name"] = df["genre_name"].apply(fix_genre_value)
 
     out = "law_dramas_all.csv"
     df.to_csv(out, index=False, encoding="utf-8-sig")
-    print(f"[✓] 저장 완료: {out} (행 수: {len(df)})")
+    print(f"[✓] 장르 보정 포함 저장 완료: {out} (행 수: {len(df)})")
 
 if __name__ == "__main__":
     main()

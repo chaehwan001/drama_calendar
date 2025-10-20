@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-카테고리 '대한민국의 SF 드라마'에서 모든 컬럼(ㄱ/ㄴ/ㄷ …) + 페이지네이션까지 훑어서
-각 항목 상세 페이지의 '제목 / 장르 / 방송사'만 추출하여 CSV 저장.
+카테고리 '대한민국의 공포 드라마'에서
+제목 / 장르 / 방송사 크롤링 후 장르 자동 보정까지 한 번에 저장.
 
-출력: sf_dramas_all.csv (UTF-8 with BOM), 컬럼: title, genre, broadcaster
+출력: horror_dramas_all.csv (UTF-8 with BOM)
+보정 규칙:
+  1) genre_name이 비었거나 None/Nan이면 → "공포"
+  2) genre_name에 "공포"가 없으면 → "공포, {기존장르}"
 """
 
 import re
@@ -24,27 +27,24 @@ HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.5",
 }
 
-SLEEP = 0.7  # 요청 간 매너 타임(초)
+SLEEP = 0.7
+
 
 def clean_text(s: str) -> str:
     if not s:
         return ""
-    s = re.sub(r"\[[^\]]*\]", "", s)  # [주 1], [1] 등 제거
+    s = re.sub(r"\[[^\]]*\]", "", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
+
 
 def get_soup(url: str) -> BeautifulSoup:
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     return BeautifulSoup(r.text, "lxml")
 
+
 def iter_all_category_links(first_url: str):
-    """
-    카테고리 페이지에서:
-      - 컬럼 인덱스 1부터 증가시키며 존재할 때까지(없으면 종료)
-      - 각 컬럼의 모든 <li><a>를 수집
-      - '다음 페이지'가 있으면 따라가며 반복
-    """
     url = first_url
     seen_urls = set()
 
@@ -72,7 +72,6 @@ def iter_all_category_links(first_url: str):
         if not found_any:
             break
 
-        # '다음 페이지' 따라가기
         next_link = None
         for a in soup.select("#mw-pages a"):
             if clean_text(a.get_text()) == "다음 페이지":
@@ -82,19 +81,12 @@ def iter_all_category_links(first_url: str):
         url = next_link
         time.sleep(SLEEP)
 
-def scrape_detail(detail_url: str) -> dict:
-    """
-    상세 페이지에서 '제목 / 장르 / 방송사' 추출.
-    - 제목: h1#firstHeading
-    - 장르/방송사: infobox의 th 라벨 확인
-    """
-    soup = get_soup(detail_url)
 
-    # 제목
+def scrape_detail(detail_url: str) -> dict:
+    soup = get_soup(detail_url)
     title_el = soup.select_one("#firstHeading")
     title = clean_text(title_el.get_text()) if title_el else ""
 
-    # infobox
     infobox = soup.select_one("#mw-content-text table.infobox")
     genre = ""
     broadcaster = ""
@@ -108,20 +100,34 @@ def scrape_detail(detail_url: str) -> dict:
             label = clean_text(th.get_text()) if th else ""
             value_text = clean_text(td.get_text())
 
-            # 장르
-            if label and ("장르" in label) and not genre:
+            if label and "장르" in label and not genre:
                 genre = value_text
 
-            # 방송사/채널/방송국
             if label and re.search(r"(방송\s*사|방송\s*채널|채널|방송국)", label) and not broadcaster:
                 links = [clean_text(a.get_text()) for a in td.select("a") if clean_text(a.get_text())]
                 broadcaster = "; ".join(links) if links else value_text
 
     return {
-    "title": title,
-    "genre_name": genre,
-    "channel_name": broadcaster.replace(";", ", ").strip(", ").strip()
-}
+        "title": title,
+        "genre_name": genre,
+        "channel_name": broadcaster.replace(";", ", ").strip(", ").strip()
+    }
+
+
+def fix_genre_value(s: object) -> str:
+    if pd.isna(s):
+        return "공포"
+    s = str(s).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return "공포"
+    s = s.strip(",; ")
+    if "공포" in s:
+        return s
+    fixed = f"공포, {s}"
+    fixed = re.sub(r"[;,]\s*[;,]+", ", ", fixed)
+    fixed = re.sub(r"\s*,\s*", ", ", fixed)
+    return fixed.strip(",; ").strip() or "공포"
+
 
 def main():
     print("[*] 크롤링 시작:", CATEGORY_URL)
@@ -145,17 +151,19 @@ def main():
         print("[-] 결과가 없습니다.")
         return
 
-    # DataFrame 구성 및 정리
     df = pd.DataFrame(rows, columns=["title", "genre_name", "channel_name"])
     for c in ["title", "genre_name", "channel_name"]:
         df[c] = df[c].astype(str).map(clean_text)
 
-    # 제목 기준 중복 제거
     df = df.drop_duplicates(subset=["title"])
+
+    # 🔹 장르 자동 보정
+    df["genre_name"] = df["genre_name"].apply(fix_genre_value)
 
     out = "horror_dramas_all.csv"
     df.to_csv(out, index=False, encoding="utf-8-sig")
-    print(f"[✓] 저장 완료: {out} (행 수: {len(df)})")
+    print(f"[✓] 장르 보정 포함 저장 완료: {out} (행 수: {len(df)})")
+
 
 if __name__ == "__main__":
     main()
