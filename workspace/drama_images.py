@@ -22,10 +22,9 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
-# ===== 고정 경로 (네가 준 경로 그대로) =====
-CSV_PATH = Path(r"C:\Users\PC\Desktop\workspace\kdrama_2025.csv")
-OUT_DIR  = Path(r"C:\Users\PC\Desktop\workspace\namu_images")
-LOG_PATH = Path(r"C:\Users\PC\Desktop\workspace\namu_image_results.csv")
+CSV_PATH = Path("kdrama_2025.csv")
+OUT_DIR  = Path("namu_images")
+LOG_PATH = Path("namu_image_results.csv")
 
 # ===== 설정 =====
 BASE = "https://namu.wiki"
