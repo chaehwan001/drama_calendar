@@ -1,0 +1,2 @@
+api
+$env:TMDB_API_KEY="5e4c4b66b48de22cb8e729274e4e2b0c"
